@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+.idea/
+.vscode/
+gt_editor_crash.log
+*.kgt
+.DS_Store
