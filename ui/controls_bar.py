@@ -1,4 +1,4 @@
-"""Controls bar — playback buttons, speed selector, frame jump."""
+"""Controls bar — playback buttons, speed selector, frame jump, and range window controls."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
@@ -24,6 +24,8 @@ class ControlsBar(QWidget):
         jump_to_frame_requested(frame_1based: int)
         prev_switch_requested()
         next_switch_requested()
+        range_bounds_changed(start_1based: int, end_1based: int)
+        range_reset_requested()
     """
 
     play_pause_toggled       = Signal()
@@ -35,6 +37,8 @@ class ControlsBar(QWidget):
     jump_to_frame_requested  = Signal(int)     # 1-based frame number from user
     prev_switch_requested    = Signal()
     next_switch_requested    = Signal()
+    range_bounds_changed     = Signal(int, int) # 1-based start, end
+    range_reset_requested    = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -90,22 +94,44 @@ class ControlsBar(QWidget):
         root.addWidget(QLabel("Frame:"))
         self._spin_frame = QSpinBox()
         self._spin_frame.setRange(1, 99999)
-        self._spin_frame.setFixedWidth(80)
+        self._spin_frame.setFixedWidth(70)
         self._spin_frame.setToolTip("Jump to frame (press Enter)")
         root.addWidget(self._spin_frame)
 
         self._btn_go = QPushButton("Go")
-        self._btn_go.setFixedWidth(38)
+        self._btn_go.setFixedWidth(32)
         root.addWidget(self._btn_go)
 
         root.addWidget(sep())
 
+        # ── Range Window Trimming ──────────────────────────────────────────
+        root.addWidget(QLabel("Window:"))
+        self._spin_start_frame = QSpinBox()
+        self._spin_start_frame.setRange(1, 99999)
+        self._spin_start_frame.setFixedWidth(70)
+        self._spin_start_frame.setToolTip("Active start frame (skip frames before this)")
+        root.addWidget(self._spin_start_frame)
+
+        root.addWidget(QLabel("-"))
+        self._spin_end_frame = QSpinBox()
+        self._spin_end_frame.setRange(1, 99999)
+        self._spin_end_frame.setFixedWidth(70)
+        self._spin_end_frame.setToolTip("Active end frame (skip frames after this)")
+        root.addWidget(self._spin_end_frame)
+
+        self._btn_reset_range = QPushButton("Reset")
+        self._btn_reset_range.setFixedWidth(48)
+        self._btn_reset_range.setToolTip("Reset active window to full sequence")
+        root.addWidget(self._btn_reset_range)
+
+        root.addWidget(sep())
+
         # ── Switch navigation ─────────────────────────────────────────────
-        self._btn_prev_sw = QPushButton("[ Previous Switch")
+        self._btn_prev_sw = QPushButton("[ Prev Sw")
         self._btn_prev_sw.setToolTip("Jump to previous ID switch frame")
         root.addWidget(self._btn_prev_sw)
 
-        self._btn_next_sw = QPushButton("Next Switch ]")
+        self._btn_next_sw = QPushButton("Next Sw ]")
         self._btn_next_sw.setToolTip("Jump to next ID switch frame")
         root.addWidget(self._btn_next_sw)
 
@@ -130,12 +156,35 @@ class ControlsBar(QWidget):
         self._btn_prev_sw.clicked.connect(self.prev_switch_requested)
         self._btn_next_sw.clicked.connect(self.next_switch_requested)
 
+        self._spin_start_frame.editingFinished.connect(self._on_range_spin_changed)
+        self._spin_end_frame.editingFinished.connect(self._on_range_spin_changed)
+        self._btn_reset_range.clicked.connect(self.range_reset_requested)
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def setup(self, frame_count: int):
         self._frame_count = frame_count
         self._spin_frame.setRange(1, frame_count)
+        self._spin_start_frame.setRange(1, frame_count)
+        self._spin_end_frame.setRange(1, frame_count)
+
+        self._spin_start_frame.blockSignals(True)
+        self._spin_start_frame.setValue(1)
+        self._spin_start_frame.blockSignals(False)
+
+        self._spin_end_frame.blockSignals(True)
+        self._spin_end_frame.setValue(frame_count)
+        self._spin_end_frame.blockSignals(False)
+
         self._lbl_position.setText(f"Frame 1 / {frame_count}")
+
+    def set_range_bounds(self, start_1based: int, end_1based: int):
+        self._spin_start_frame.blockSignals(True)
+        self._spin_end_frame.blockSignals(True)
+        self._spin_start_frame.setValue(start_1based)
+        self._spin_end_frame.setValue(end_1based)
+        self._spin_start_frame.blockSignals(False)
+        self._spin_end_frame.blockSignals(False)
 
     def set_playing(self, playing: bool):
         self._btn_play.setText("⏸" if playing else "▶")
@@ -159,3 +208,11 @@ class ControlsBar(QWidget):
 
     def _on_go(self):
         self.jump_to_frame_requested.emit(self._spin_frame.value())
+
+    def _on_range_spin_changed(self):
+        s = self._spin_start_frame.value()
+        e = self._spin_end_frame.value()
+        if s > e:
+            s = e
+            self._spin_start_frame.setValue(s)
+        self.range_bounds_changed.emit(s, e)

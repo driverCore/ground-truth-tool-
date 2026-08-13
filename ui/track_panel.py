@@ -1,4 +1,4 @@
-"""Track Panel — right-side panel showing selected detection info, bounding box controls, and all tracks in frame."""
+"""Track Panel — right-side panel showing selected detection info, bounding box controls, track list, and video range trimming."""
 from __future__ import annotations
 
 from typing import Optional
@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QListWidget, QListWidgetItem, QGroupBox, QFrame, QComboBox,
+    QListWidget, QListWidgetItem, QGroupBox, QFrame, QComboBox, QSpinBox,
 )
 
 from models.track_store import EffectiveDet, TrackStore
@@ -29,6 +29,8 @@ class TrackPanel(QWidget):
         delete_box_requested(det_idx, frame_idx)
         add_box_requested(frame_idx)
         change_class_requested(det_idx, frame_idx, new_cls_id, new_cls_name)
+        range_bounds_changed(start_1based, end_1based)
+        range_reset_requested()
     """
 
     change_id_requested    = Signal(int, int)   # det_idx, frame_idx
@@ -39,6 +41,8 @@ class TrackPanel(QWidget):
     delete_box_requested   = Signal(int, int)   # det_idx, frame_idx
     add_box_requested      = Signal(int)         # frame_idx
     change_class_requested = Signal(int, int, int, str) # det_idx, frame_idx, cls_id, cls_name
+    range_bounds_changed   = Signal(int, int)   # 1-based start, end
+    range_reset_requested  = Signal()
 
     CLASSES = [
         (0, "player"),
@@ -100,55 +104,85 @@ class TrackPanel(QWidget):
         sg.addLayout(class_row)
 
         _, self._lbl_status   = lrow("Status")
-        _, self._lbl_bbox     = lrow("BBox xyxy")
+        _, self._lbl_bbox     = lrow("Bounding Box")
         _, self._lbl_conf     = lrow("Confidence")
-        _, self._lbl_span     = lrow("Track span")
+        _, self._lbl_span     = lrow("Track Span")
 
-        sep1 = QFrame(); sep1.setFrameShape(QFrame.HLine)
-        sg.addWidget(sep1)
-
-        # BBox & ID action buttons
+        # Action buttons
         btn_row1 = QHBoxLayout()
-        self._btn_add_box = QPushButton("+ Add Box (A)")
-        self._btn_add_box.setToolTip("Add new bounding box to this frame (Key: A)")
-        self._btn_add_box.clicked.connect(self._on_add_box)
-        btn_row1.addWidget(self._btn_add_box)
-
-        self._btn_del_box = QPushButton("Delete Box")
-        self._btn_del_box.setStyleSheet("background-color: #d32f2f; color: white;")
-        self._btn_del_box.setToolTip("Delete selected bounding box (Delete key)")
-        self._btn_del_box.clicked.connect(self._on_delete_box)
-        btn_row1.addWidget(self._btn_del_box)
+        self._btn_change_id = QPushButton("✎ Change ID...")
+        self._btn_change_id.setObjectName("btn_primary")
+        self._btn_change_id.setToolTip("Reassign track ID (in-place or dialog)")
+        self._btn_merge = QPushButton("🔗 Merge Track...")
+        self._btn_merge.setToolTip("Merge this track into another ID across all frames")
+        btn_row1.addWidget(self._btn_change_id)
+        btn_row1.addWidget(self._btn_merge)
         sg.addLayout(btn_row1)
 
         btn_row2 = QHBoxLayout()
-        self._btn_change_id = QPushButton("Change ID")
-        self._btn_change_id.setObjectName("btn_primary")
-        self._btn_change_id.setToolTip("Edit this player's track ID")
-        self._btn_change_id.clicked.connect(self._on_change_id)
-        btn_row2.addWidget(self._btn_change_id)
-
-        self._btn_verify = QPushButton("✓ Verify Frame")
-        self._btn_verify.setObjectName("btn_success")
-        self._btn_verify.setToolTip("Mark all tracks in this frame as verified")
-        self._btn_verify.clicked.connect(self._on_verify)
-        btn_row2.addWidget(self._btn_verify)
+        self._btn_split = QPushButton("✂ Split Track...")
+        self._btn_split.setToolTip("Split track from current frame forward into a new ID")
+        self._btn_delete_box = QPushButton("❌ Delete Box")
+        self._btn_delete_box.setToolTip("Delete selected bounding box (Delete key)")
+        btn_row2.addWidget(self._btn_split)
+        btn_row2.addWidget(self._btn_delete_box)
         sg.addLayout(btn_row2)
 
         btn_row3 = QHBoxLayout()
-        self._btn_merge = QPushButton("Merge Track")
-        self._btn_merge.setToolTip("Merge this track into another ID")
-        self._btn_merge.clicked.connect(self._on_merge)
-        btn_row3.addWidget(self._btn_merge)
-
-        self._btn_split = QPushButton("Split Here")
-        self._btn_split.setToolTip("Split this track at current frame")
-        self._btn_split.clicked.connect(self._on_split)
-        btn_row3.addWidget(self._btn_split)
+        self._btn_add_box = QPushButton("➕ Draw New Box")
+        self._btn_add_box.setToolTip("Toggle Draw Box mode (W key)")
+        self._btn_verify = QPushButton("✓ Verify Frame")
+        self._btn_verify.setToolTip("Mark frame as verified (V key)")
+        btn_row3.addWidget(self._btn_add_box)
+        btn_row3.addWidget(self._btn_verify)
         sg.addLayout(btn_row3)
+
+        # Wire action buttons
+        self._btn_change_id.clicked.connect(self._on_change_id)
+        self._btn_merge.clicked.connect(self._on_merge)
+        self._btn_split.clicked.connect(self._on_split)
+        self._btn_delete_box.clicked.connect(self._on_delete_box)
+        self._btn_add_box.clicked.connect(self._on_add_box)
+        self._btn_verify.clicked.connect(self._on_verify)
 
         self._set_selected_enabled(False)
         root.addWidget(self._grp_selected)
+
+        # ── Video Window Trimming (Sliding Window) ─────────────────────
+        self._grp_trim = QGroupBox("✂ Video Frame Trimming (Sliding Window)")
+        tg = QVBoxLayout(self._grp_trim)
+        tg.setSpacing(4)
+
+        hint = QLabel("Trim frames from start & end. Only active window frames are saved to tracks.json.")
+        hint.setWordWrap(True)
+        hint.setObjectName("label_secondary")
+        hint.setStyleSheet("font-size: 11px; color: #a0aec0;")
+        tg.addWidget(hint)
+
+        trim_row = QHBoxLayout()
+        trim_row.addWidget(QLabel("Start:"))
+        self._spin_trim_start = QSpinBox()
+        self._spin_trim_start.setRange(1, 99999)
+        self._spin_trim_start.setToolTip("Skip frames before this Start Frame")
+        trim_row.addWidget(self._spin_trim_start)
+
+        trim_row.addWidget(QLabel("End:"))
+        self._spin_trim_end = QSpinBox()
+        self._spin_trim_end.setRange(1, 99999)
+        self._spin_trim_end.setToolTip("Skip frames after this End Frame")
+        trim_row.addWidget(self._spin_trim_end)
+
+        self._btn_reset_trim = QPushButton("Reset")
+        self._btn_reset_trim.setFixedWidth(50)
+        self._btn_reset_trim.setToolTip("Reset active window to full sequence")
+        trim_row.addWidget(self._btn_reset_trim)
+        tg.addLayout(trim_row)
+
+        self._spin_trim_start.editingFinished.connect(self._on_trim_spin_changed)
+        self._spin_trim_end.editingFinished.connect(self._on_trim_spin_changed)
+        self._btn_reset_trim.clicked.connect(self.range_reset_requested)
+
+        root.addWidget(self._grp_trim)
 
         # ── All tracks in frame ──────────────────────────────────────────
         self._grp_all = QGroupBox("All Tracks — This Frame")
@@ -177,6 +211,24 @@ class TrackPanel(QWidget):
         root.addStretch()
 
     # ── Public API ────────────────────────────────────────────────────────
+
+    def setup_range_bounds(self, frame_count: int, start_1based: int, end_1based: int):
+        self._spin_trim_start.blockSignals(True)
+        self._spin_trim_end.blockSignals(True)
+        self._spin_trim_start.setRange(1, frame_count)
+        self._spin_trim_end.setRange(1, frame_count)
+        self._spin_trim_start.setValue(start_1based)
+        self._spin_trim_end.setValue(end_1based)
+        self._spin_trim_start.blockSignals(False)
+        self._spin_trim_end.blockSignals(False)
+
+    def set_range_bounds(self, start_1based: int, end_1based: int):
+        self._spin_trim_start.blockSignals(True)
+        self._spin_trim_end.blockSignals(True)
+        self._spin_trim_start.setValue(start_1based)
+        self._spin_trim_end.setValue(end_1based)
+        self._spin_trim_start.blockSignals(False)
+        self._spin_trim_end.blockSignals(False)
 
     def update_frame(self, frame_idx: int, detections: list[EffectiveDet]):
         self._frame_idx  = frame_idx
@@ -254,57 +306,63 @@ class TrackPanel(QWidget):
         self._combo_class.blockSignals(False)
 
         self._lbl_status.setText(status_text)
-        self._lbl_bbox.setText(f"[{x1},{y1},{x2},{y2}]")
-        self._lbl_conf.setText(f"{det.conf:.3f}")
-        self._lbl_span.setText(f"frame {s+1} – {e+1}")
+        self._lbl_status.setStyleSheet(f"color: {STATUS_COLORS.get(det.status, '#e2e8f0')};")
+
+        self._lbl_bbox.setText(f"({x1}, {y1}) → ({x2}, {y2})  [{x2-x1}×{y2-y1}]")
+        self._lbl_conf.setText(f"{det.conf:.2f}")
+        self._lbl_span.setText(f"frames {s+1}–{e+1}  ({length} frames)")
+
         self._set_selected_enabled(True)
 
     def _set_selected_enabled(self, enabled: bool):
         self._btn_change_id.setEnabled(enabled)
-        self._btn_del_box.setEnabled(enabled)
         self._btn_merge.setEnabled(enabled)
         self._btn_split.setEnabled(enabled)
+        self._btn_delete_box.setEnabled(enabled)
         self._combo_class.setEnabled(enabled)
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
     def _on_list_selection_changed(self, row: int):
-        item = self._track_list.item(row)
-        if item is None:
+        if row < 0 or row >= self._track_list.count():
             return
+        item = self._track_list.item(row)
         det_idx = item.data(Qt.UserRole)
-        det = next((d for d in self._detections if d.det_idx == det_idx), None)
-        self._selected = det
-        self._refresh_selected_panel(det)
         self.track_selected.emit(det_idx)
 
     def _on_change_id(self):
-        if self._selected and self._frame_idx >= 0:
+        if self._selected:
             self.change_id_requested.emit(self._selected.det_idx, self._frame_idx)
-
-    def _on_delete_box(self):
-        if self._selected and self._frame_idx >= 0:
-            self.delete_box_requested.emit(self._selected.det_idx, self._frame_idx)
-
-    def _on_add_box(self):
-        if self._frame_idx >= 0:
-            self.add_box_requested.emit(self._frame_idx)
-
-    def _on_class_changed(self, idx: int):
-        if self._selected and self._frame_idx >= 0:
-            cid, cname = self._combo_class.itemData(idx)
-            self.change_class_requested.emit(
-                self._selected.det_idx, self._frame_idx, cid, cname
-            )
 
     def _on_merge(self):
         if self._selected:
             self.merge_requested.emit(self._selected.current_id)
 
     def _on_split(self):
-        if self._selected and self._frame_idx >= 0:
+        if self._selected:
             self.split_requested.emit(self._selected.original_id, self._frame_idx)
 
+    def _on_delete_box(self):
+        if self._selected:
+            self.delete_box_requested.emit(self._selected.det_idx, self._frame_idx)
+
+    def _on_add_box(self):
+        self.add_box_requested.emit(self._frame_idx)
+
     def _on_verify(self):
-        if self._frame_idx >= 0:
-            self.verify_frame_requested.emit(self._frame_idx)
+        self.verify_frame_requested.emit(self._frame_idx)
+
+    def _on_class_changed(self, idx: int):
+        if self._selected and idx >= 0:
+            cid, cname = self.CLASSES[idx]
+            self.change_class_requested.emit(
+                self._selected.det_idx, self._frame_idx, cid, cname
+            )
+
+    def _on_trim_spin_changed(self):
+        s = self._spin_trim_start.value()
+        e = self._spin_trim_end.value()
+        if s > e:
+            s = e
+            self._spin_trim_start.setValue(s)
+        self.range_bounds_changed.emit(s, e)

@@ -206,6 +206,10 @@ class MainWindow(QMainWindow):
         self._controls.next_switch_requested.connect(self._next_switch)
 
         self._timeline.seek_requested.connect(self._play_ctrl.seek)
+        self._timeline.range_changed.connect(self._on_timeline_range_changed)
+
+        self._controls.range_bounds_changed.connect(self._on_controls_range_changed)
+        self._controls.range_reset_requested.connect(self._on_range_reset_requested)
 
         self._track_panel.change_id_requested.connect(self._on_change_id_requested)
         self._track_panel.merge_requested.connect(self._on_merge_requested)
@@ -217,6 +221,8 @@ class MainWindow(QMainWindow):
         self._track_panel.delete_box_requested.connect(self._on_delete_selected_box)
         self._track_panel.add_box_requested.connect(self._toggle_add_box_mode)
         self._track_panel.change_class_requested.connect(self._on_change_class)
+        self._track_panel.range_bounds_changed.connect(self._on_controls_range_changed)
+        self._track_panel.range_reset_requested.connect(self._on_range_reset_requested)
 
     def _connect_edit_ctrl_signals(self):
         """Connect edit controller signals (reconnected on each file load)."""
@@ -364,6 +370,7 @@ class MainWindow(QMainWindow):
         self._timeline.setup([f.frame_idx for f in self._store.all_frames()])
         self._refresh_timeline_markers()
         self._track_panel._store = self._store
+        self._track_panel.setup_range_bounds(self._store.frame_count, 1, self._store.frame_count)
         self._on_frame_position_changed(0)
 
         # Settings + status
@@ -685,6 +692,53 @@ class MainWindow(QMainWindow):
     def _current_frame_idx(self) -> int:
         fd = self._store.get_frame_by_position(self._play_ctrl.current_position)
         return fd.frame_idx if fd else -1
+
+    def _on_timeline_range_changed(self, start_pos: int, end_pos: int):
+        if not self._store or self._store.frame_count == 0:
+            return
+        self._store.set_range_bounds(start_pos, end_pos)
+        all_f = self._store.all_frames()
+        if 0 <= start_pos < len(all_f) and 0 <= end_pos < len(all_f):
+            s_1based = all_f[start_pos].frame_idx + 1
+            e_1based = all_f[end_pos].frame_idx + 1
+            self._controls.set_range_bounds(s_1based, e_1based)
+            self._track_panel.set_range_bounds(s_1based, e_1based)
+            active_count = end_pos - start_pos + 1
+            self._status.showMessage(
+                f"Sliding Window set: Frames {s_1based} .. {e_1based} ({active_count} active frames)", 3000
+            )
+
+    def _on_controls_range_changed(self, start_1based: int, end_1based: int):
+        if not self._store or self._store.frame_count == 0:
+            return
+        pos_start = self._store.position_of(start_1based - 1)
+        pos_end   = self._store.position_of(end_1based - 1)
+        if pos_start < 0:
+            pos_start = 0
+        if pos_end < 0:
+            pos_end = self._store.frame_count - 1
+        self._timeline.set_range(pos_start, pos_end)
+        self._controls.set_range_bounds(start_1based, end_1based)
+        self._track_panel.set_range_bounds(start_1based, end_1based)
+        self._store.set_range_bounds(pos_start, pos_end)
+        active_count = max(0, pos_end - pos_start + 1)
+        self._status.showMessage(
+            f"Sliding Window set: Frames {start_1based} .. {end_1based} ({active_count} active frames)", 3000
+        )
+
+    def _on_range_reset_requested(self):
+        if not self._store or self._store.frame_count == 0:
+            return
+        self._store.reset_range()
+        sp, ep = self._store.get_range_bounds()
+        self._timeline.set_range(sp, ep)
+        all_f = self._store.all_frames()
+        if all_f:
+            s_1based = all_f[sp].frame_idx + 1
+            e_1based = all_f[ep].frame_idx + 1
+            self._controls.set_range_bounds(s_1based, e_1based)
+            self._track_panel.set_range_bounds(s_1based, e_1based)
+        self._status.showMessage("Sliding Window reset to full sequence", 3000)
 
     def _refresh_statistics(self):
         stats = self._store.get_statistics()

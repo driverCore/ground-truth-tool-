@@ -70,6 +70,8 @@ class TrackStore:
         self._switch_frames:   set[int]                              = set()
         self._corrections_log: list[dict]                            = []
         self._json_path:       Optional[str]                         = None  # path to source tracks.json
+        self._range_start_pos: int                                   = 0
+        self._range_end_pos:   int                                   = -1
 
     # ── Loading ───────────────────────────────────────────────────────────
 
@@ -77,6 +79,8 @@ class TrackStore:
         """Ingest the list of frame dicts from tracks.json."""
         self._frames.clear()
         self._frame_map.clear()
+        self._range_start_pos = 0
+        self._range_end_pos   = -1
 
         for pos, rec in enumerate(records):
             frame_name = rec.get("frame", f"frame_{pos:04d}")
@@ -460,12 +464,39 @@ class TrackStore:
                 self._switch_frames.add(f.frame_idx)
             prev_ids = curr_ids
 
+    # ── Range Sliding Window Bounds ────────────────────────────────────────
+
+    def set_range_bounds(self, start_pos: int, end_pos: int):
+        if not self._frames:
+            return
+        sp = max(0, min(start_pos, len(self._frames) - 1))
+        ep = max(sp, min(end_pos, len(self._frames) - 1))
+        self._range_start_pos = sp
+        self._range_end_pos   = ep
+
+    def get_range_bounds(self) -> tuple[int, int]:
+        if not self._frames:
+            return (0, 0)
+        end_p = self._range_end_pos if self._range_end_pos >= 0 else (len(self._frames) - 1)
+        return (self._range_start_pos, end_p)
+
+    def reset_range(self):
+        if self._frames:
+            self._range_start_pos = 0
+            self._range_end_pos   = len(self._frames) - 1
+
     # ── Export serialization ──────────────────────────────────────────────
 
     def to_export_records(self) -> list[dict]:
-        """Produce the full corrected records list for ground_truth_tracks.json."""
+        """Produce the full corrected records list for ground_truth_tracks.json,
+        filtered to the active sliding window [range_start_pos, range_end_pos]."""
+        if not self._frames:
+            return []
+        sp, ep = self.get_range_bounds()
+        selected_frames = self._frames[sp : ep + 1]
+
         records = []
-        for f in self._frames:
+        for f in selected_frames:
             eff = self.get_frame_tracks(f.frame_idx)
             records.append({
                 "frame":      f.frame_name,

@@ -1,31 +1,37 @@
-"""Interactive Timeline widget — shows all frames as a horizontal bar with coloured markers."""
+"""Interactive Timeline widget — shows all frames as a horizontal bar with coloured markers and dual-handle sliding window range selection."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QRect, QPoint, QSize
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QFontMetrics, QMouseEvent
+from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QFontMetrics, QMouseEvent, QPolygon
 from PySide6.QtWidgets import QWidget, QSizePolicy, QToolTip
 
 from utils.colors import TIMELINE_COLORS, BG_SURFACE, BG_WIDGET, BORDER, ACCENT, TEXT_SEC
 
 
 class TimelineWidget(QWidget):
-    """Horizontal timeline bar.
+    """Horizontal timeline bar with dual-handle sliding window range selection.
 
     Emits:
         seek_requested(position: int) — 0-based position in frame list
+        range_changed(start_pos: int, end_pos: int) — active sliding window bounds (0-based positions)
     """
 
     seek_requested = Signal(int)
+    range_changed  = Signal(int, int)
 
     BAR_HEIGHT    = 18
     MARKER_HEIGHT = 12
     TICK_HEIGHT   = 6
     TOTAL_HEIGHT  = 54
+    HANDLE_HIT_PX = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._frame_count    = 0
         self._current_pos    = 0          # 0-based list position
+        self._start_pos      = 0          # sliding window start position
+        self._end_pos        = 0          # sliding window end position
+        self._dragging_handle: str | None = None  # 'start' | 'end' | None
         self._switch_frames:  set[int]   = set()   # frame_idx values
         self._edited_frames:  set[int]   = set()
         self._verified_frames: set[int]  = set()
@@ -44,11 +50,31 @@ class TimelineWidget(QWidget):
     def setup(self, frame_idx_list: list[int]):
         self._frame_idx_list = list(frame_idx_list)
         self._frame_count    = len(frame_idx_list)
+        self._start_pos      = 0
+        self._end_pos        = max(0, self._frame_count - 1)
         self.update()
 
     def set_current_position(self, pos: int):
         self._current_pos = pos
         self.update()
+
+    def set_range(self, start_pos: int, end_pos: int):
+        if self._frame_count == 0:
+            return
+        sp = max(0, min(start_pos, self._frame_count - 1))
+        ep = max(sp, min(end_pos, self._frame_count - 1))
+        if sp != self._start_pos or ep != self._end_pos:
+            self._start_pos = sp
+            self._end_pos   = ep
+            self.update()
+
+    def get_range(self) -> tuple[int, int]:
+        return (self._start_pos, self._end_pos)
+
+    def reset_range(self):
+        if self._frame_count > 0:
+            self.set_range(0, self._frame_count - 1)
+            self.range_changed.emit(self._start_pos, self._end_pos)
 
     def update_markers(self,
                        switch_frames:   set[int],
@@ -75,27 +101,71 @@ class TimelineWidget(QWidget):
         bar_y = 16
         painter.fillRect(0, bar_y, W, self.BAR_HEIGHT, QColor(BG_WIDGET))
 
-        # Markers
+        # Active sliding window highlight
+        start_x = self._pos_to_x(self._start_pos)
+        end_x   = self._pos_to_x(self._end_pos)
+        if start_x <= end_x:
+            painter.fillRect(start_x, bar_y, max(1, end_x - start_x + 1), self.BAR_HEIGHT, QColor(49, 130, 206, 45))
+
+        # Markers inside window
         for pos, fidx in enumerate(self._frame_idx_list):
             x = self._pos_to_x(pos)
-            self._draw_marker(painter, x, bar_y, fidx)
+            is_active = (self._start_pos <= pos <= self._end_pos)
+            self._draw_marker(painter, x, bar_y, fidx, active=is_active)
+
+        # Dimmed overlays outside sliding window
+        if start_x > 0:
+            painter.fillRect(0, bar_y, start_x, self.BAR_HEIGHT, QColor(0, 0, 0, 160))
+        if end_x < W - 1:
+            painter.fillRect(end_x + 1, bar_y, W - end_x - 1, self.BAR_HEIGHT, QColor(0, 0, 0, 160))
+
+        # Range Handles: Start handle (Green) and End handle (Red)
+        # Left Start Handle [
+        painter.setPen(QPen(QColor("#38a169"), 3))
+        painter.drawLine(start_x, bar_y - 2, start_x, bar_y + self.BAR_HEIGHT + 2)
+        tri_start = QPolygon([
+            QPoint(start_x,     bar_y - 6),
+            QPoint(start_x - 6, bar_y - 12),
+            QPoint(start_x + 6, bar_y - 12),
+        ])
+        painter.setBrush(QBrush(QColor("#38a169")))
+        painter.setPen(Qt.NoPen)
+        painter.drawPolygon(tri_start)
+
+        # Right End Handle ]
+        painter.setPen(QPen(QColor("#e53e3e"), 3))
+        painter.drawLine(end_x, bar_y - 2, end_x, bar_y + self.BAR_HEIGHT + 2)
+        tri_end = QPolygon([
+            QPoint(end_x,     bar_y - 6),
+            QPoint(end_x - 6, bar_y - 12),
+            QPoint(end_x + 6, bar_y - 12),
+        ])
+        painter.setBrush(QBrush(QColor("#e53e3e")))
+        painter.setPen(Qt.NoPen)
+        painter.drawPolygon(tri_end)
+
+        # Handle Labels (S / E) above bar
+        painter.setFont(self._font)
+        painter.setPen(QColor("#38a169"))
+        painter.drawText(max(0, start_x - 4), bar_y - 14, "S")
+        painter.setPen(QColor("#e53e3e"))
+        painter.drawText(min(W - 10, end_x - 4), bar_y - 14, "E")
 
         # Current position indicator (white line + triangle)
         cx = self._pos_to_x(self._current_pos)
         painter.setPen(QPen(QColor("white"), 2))
         painter.drawLine(cx, bar_y - 4, cx, bar_y + self.BAR_HEIGHT + 4)
 
-        # Triangle above bar
+        # Triangle above bar for current position
         tri_x, tri_y = cx, bar_y - 4
-        from PySide6.QtGui import QPolygon
-        tri = QPolygon([
+        tri_curr = QPolygon([
             QPoint(tri_x - 5, tri_y - 8),
             QPoint(tri_x + 5, tri_y - 8),
             QPoint(tri_x,     tri_y),
         ])
         painter.setBrush(QBrush(QColor("white")))
         painter.setPen(Qt.NoPen)
-        painter.drawPolygon(tri)
+        painter.drawPolygon(tri_curr)
 
         # Hover indicator
         if 0 <= self._hover_pos < self._frame_count:
@@ -110,7 +180,7 @@ class TimelineWidget(QWidget):
             fm = QFontMetrics(self._font)
             first_label = str(self._frame_idx_list[0] + 1)
             last_label  = str(self._frame_idx_list[-1] + 1)
-            curr_label  = str(self._frame_idx_list[self._current_pos] + 1)
+            curr_label  = f"{self._frame_idx_list[self._current_pos] + 1}  [Range: {self._frame_idx_list[self._start_pos] + 1} - {self._frame_idx_list[self._end_pos] + 1}]"
             painter.drawText(2, H - 2, first_label)
             tw = fm.horizontalAdvance(last_label)
             painter.drawText(W - tw - 2, H - 2, last_label)
@@ -118,7 +188,7 @@ class TimelineWidget(QWidget):
             painter.setPen(QColor("white"))
             painter.drawText(max(0, cx - tw2 // 2), H - 2, curr_label)
 
-    def _draw_marker(self, painter: QPainter, x: int, bar_y: int, fidx: int):
+    def _draw_marker(self, painter: QPainter, x: int, bar_y: int, fidx: int, active: bool = True):
         # Priority: switch > edited > verified
         if fidx in self._switch_frames:
             color = TIMELINE_COLORS["switch"]
@@ -129,6 +199,10 @@ class TimelineWidget(QWidget):
         else:
             return   # unreviewed — no marker
 
+        if not active:
+            color = QColor(color)
+            color.setAlpha(60)
+
         w = max(2, self.width() // max(1, self._frame_count) - 1)
         painter.fillRect(x - w // 2, bar_y + 2,
                          max(2, w), self.BAR_HEIGHT - 4, color)
@@ -137,32 +211,76 @@ class TimelineWidget(QWidget):
 
     def mousePressEvent(self, e: QMouseEvent):
         if e.button() == Qt.LeftButton:
-            pos = self._x_to_pos(e.pos().x())
-            if 0 <= pos < self._frame_count:
-                self.seek_requested.emit(pos)
+            x = e.pos().x()
+            sx = self._pos_to_x(self._start_pos)
+            ex = self._pos_to_x(self._end_pos)
+
+            if abs(x - sx) <= self.HANDLE_HIT_PX:
+                self._dragging_handle = 'start'
+            elif abs(x - ex) <= self.HANDLE_HIT_PX:
+                self._dragging_handle = 'end'
+            else:
+                self._dragging_handle = None
+                pos = self._x_to_pos(x)
+                if 0 <= pos < self._frame_count:
+                    self.seek_requested.emit(pos)
 
     def mouseMoveEvent(self, e: QMouseEvent):
-        pos = self._x_to_pos(e.pos().x())
-        if pos != self._hover_pos:
-            self._hover_pos = pos
-            self.update()
-        # Tooltip
-        if 0 <= pos < self._frame_count:
-            fidx = self._frame_idx_list[pos]
-            tags: list[str] = []
-            if fidx in self._switch_frames:
-                tags.append("ID switch")
-            if fidx in self._edited_frames:
-                tags.append("edited")
-            if fidx in self._verified_frames:
-                tags.append("verified")
-            tip = f"Frame {fidx + 1}"
-            if tags:
-                tip += f"  [{', '.join(tags)}]"
-            QToolTip.showText(e.globalPos(), tip, self)
+        x = e.pos().x()
+
+        if self._dragging_handle == 'start':
+            new_pos = max(0, min(self._x_to_pos(x), self._end_pos))
+            if new_pos != self._start_pos:
+                self._start_pos = new_pos
+                self.range_changed.emit(self._start_pos, self._end_pos)
+                self.update()
+        elif self._dragging_handle == 'end':
+            new_pos = max(self._start_pos, min(self._x_to_pos(x), self._frame_count - 1))
+            if new_pos != self._end_pos:
+                self._end_pos = new_pos
+                self.range_changed.emit(self._start_pos, self._end_pos)
+                self.update()
+        else:
+            # Hover cursor feedback for handles
+            sx = self._pos_to_x(self._start_pos)
+            ex = self._pos_to_x(self._end_pos)
+            if abs(x - sx) <= self.HANDLE_HIT_PX or abs(x - ex) <= self.HANDLE_HIT_PX:
+                self.setCursor(Qt.SizeHorCursor)
+            else:
+                self.setCursor(Qt.PointingHandCursor)
+
+            pos = self._x_to_pos(x)
+            if pos != self._hover_pos:
+                self._hover_pos = pos
+                self.update()
+
+            # Tooltip
+            if 0 <= pos < self._frame_count:
+                fidx = self._frame_idx_list[pos]
+                tags: list[str] = []
+                if pos < self._start_pos:
+                    tags.append("skipped (before start)")
+                elif pos > self._end_pos:
+                    tags.append("skipped (after end)")
+                if fidx in self._switch_frames:
+                    tags.append("ID switch")
+                if fidx in self._edited_frames:
+                    tags.append("edited")
+                if fidx in self._verified_frames:
+                    tags.append("verified")
+                tip = f"Frame {fidx + 1}"
+                if tags:
+                    tip += f"  [{', '.join(tags)}]"
+                QToolTip.showText(e.globalPos(), tip, self)
+
+    def mouseReleaseEvent(self, e: QMouseEvent):
+        if self._dragging_handle:
+            self._dragging_handle = None
+            self.setCursor(Qt.PointingHandCursor)
 
     def leaveEvent(self, _):
         self._hover_pos = -1
+        self._dragging_handle = None
         self.update()
 
     # ── Helpers ───────────────────────────────────────────────────────────
