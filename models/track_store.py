@@ -148,6 +148,40 @@ class TrackStore:
                     pass
 
 
+    # ── Trim ──────────────────────────────────────────────────────────────
+
+    def trim_frames(self, start_pos: int, end_pos: int) -> list:
+        """Remove frames outside [start_pos, end_pos] (0-based, inclusive).
+
+        Drops all corrections / edits / verified flags for removed frames,
+        rebuilds the frame map and switch set, then rewrites the JSON.
+
+        Returns the list of FrameData objects that were removed (so the
+        caller can optionally delete the corresponding image files from disk).
+        """
+        # Collect removed frames (before + after the kept window)
+        removed: list[FrameData] = (
+            list(self._frames[:start_pos]) + list(self._frames[end_pos + 1:])
+        )
+        removed_idxs: set[int] = {f.frame_idx for f in removed}
+
+        # Slice in-place
+        self._frames = self._frames[start_pos : end_pos + 1]
+        self._frame_map = {f.frame_idx: f for f in self._frames}
+
+        # Prune correction / edit / verified data for removed frames
+        for fi in removed_idxs:
+            self._corrections.pop(fi, None)
+            self._bbox_edits.pop(fi, None)
+            self._class_edits.pop(fi, None)
+            self._added_detections.pop(fi, None)
+            self._deleted_detections.pop(fi, None)
+            self._verified_frames.discard(fi)
+
+        self._recompute_switches()
+        self.write_to_json()
+        return removed
+
     # ── Frame queries ─────────────────────────────────────────────────────
 
     @property

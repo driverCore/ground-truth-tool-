@@ -238,22 +238,21 @@ class FrameCanvas(QWidget):
             for hx, hy in handles.values():
                 painter.drawRect(hx - hs // 2, hy - hs // 2, hs, hs)
 
-            # Draw × button for hovered or selected box
-            if is_selected or is_hovered:
-                btn_size = 20
-                margin = 4
-                btn_rect = QRectF(cx2 - btn_size - margin, cy1 + margin, btn_size, btn_size)
-                
-                # Draw a nice red circular button
-                painter.setPen(QPen(QColor(255, 255, 255), 1.5))
-                painter.setBrush(QBrush(QColor(239, 68, 68))) # Tailwind red-500
-                painter.drawEllipse(btn_rect)
-                
-                # Draw '×' text centered
-                old_font = painter.font()
-                painter.setFont(QFont("Segoe UI", 11, QFont.Bold))
-                painter.drawText(btn_rect, Qt.AlignCenter, "×")
-                painter.setFont(old_font)
+            # Draw × delete button (only visible on the selected box)
+            btn_size = 20
+            margin = 4
+            btn_rect = QRectF(cx2 - btn_size - margin, cy1 + margin, btn_size, btn_size)
+            
+            # Draw a nice red circular button
+            painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+            painter.setBrush(QBrush(QColor(239, 68, 68))) # Tailwind red-500
+            painter.drawEllipse(btn_rect)
+            
+            # Draw '×' text centered
+            old_font = painter.font()
+            painter.setFont(QFont("Segoe UI", 11, QFont.Bold))
+            painter.drawText(btn_rect, Qt.AlignCenter, "×")
+            painter.setFont(old_font)
 
         # ID & Class label
         label = f"ID {det.current_id}"
@@ -341,10 +340,16 @@ class FrameCanvas(QWidget):
         }
 
     def _get_cancel_btn_rect(self) -> Optional[QRectF]:
-        target_det = self._hovered_det if self._hovered_det is not None else self._selected_det
-        if target_det is None:
+        """Return the rect of the × delete button for the *selected* detection only.
+
+        The button is tied exclusively to the selected box so that:
+        - Hovering a box never shows or activates the button (prevents
+          accidental deletes when the user just wants to select).
+        - Overlapping boxes cannot steal the button from a selected box.
+        """
+        if self._selected_det is None:
             return None
-        det = next((d for d in self._detections if d.det_idx == target_det), None)
+        det = next((d for d in self._detections if d.det_idx == self._selected_det), None)
         if not det:
             return None
 
@@ -473,25 +478,27 @@ class FrameCanvas(QWidget):
             return
 
         if e.button() == Qt.LeftButton:
-            # Check cancel button click first
+            # Check cancel button click first — only fires for the *selected* box.
+            # Using _selected_det directly (not _hovered_det) means overlapping
+            # boxes cannot block the button, and the button never fires on a
+            # box that hasn't been explicitly selected yet.
             btn_rect = self._get_cancel_btn_rect()
-            if btn_rect:
+            if btn_rect and self._selected_det is not None:
                 mx, my = e.pos().x(), e.pos().y()
                 if btn_rect.left() <= mx <= btn_rect.right() and btn_rect.top() <= my <= btn_rect.bottom():
-                    target_det = self._hovered_det if self._hovered_det is not None else self._selected_det
-                    if target_det is not None:
-                        self.cancel_detection.emit(target_det, self._frame_idx)
-                        e.accept()
-                        return
+                    self.cancel_detection.emit(self._selected_det, self._frame_idx)
+                    e.accept()
+                    return
 
             cx, cy = e.pos().x(), e.pos().y()
 
-            # Check ID label click
-            hit_det_idx = self._hit_test_label(cx, cy)
-            if hit_det_idx is not None:
-                self._start_inplace_edit(hit_det_idx)
-                e.accept()
-                return
+            # Check ID label click — only when NOT in create/draw mode
+            if not self._create_mode:
+                hit_det_idx = self._hit_test_label(cx, cy)
+                if hit_det_idx is not None:
+                    self._start_inplace_edit(hit_det_idx)
+                    e.accept()
+                    return
 
             # 1. Check handle hit first
             h_name = self._hit_test_handle(cx, cy)
@@ -688,16 +695,28 @@ class FrameCanvas(QWidget):
             super().mouseDoubleClickEvent(e)
 
     def eventFilter(self, watched, event) -> bool:
-        if watched == self._id_editor and event.type() == QEvent.KeyPress:
-            key = event.key()
-            if key == Qt.Key_A or key == Qt.Key_D:
+        if watched == self._id_editor:
+            if event.type() == QEvent.KeyPress:
+                key = event.key()
+                if key == Qt.Key_A or key == Qt.Key_D:
+                    self._on_id_editing_finished()
+                    if key == Qt.Key_A:
+                        self.navigate_frame.emit("prev")
+                    else:
+                        self.navigate_frame.emit("next")
+                    return True
+            elif event.type() == QEvent.MouseButtonDblClick:
+                # Double-click while the ID editor is open: save the typed ID
+                # then navigate just like a normal canvas double-click.
+                btn = event.button()
                 self._on_id_editing_finished()
-                if key == Qt.Key_A:
+                if btn == Qt.LeftButton:
                     self.navigate_frame.emit("prev")
-                else:
+                elif btn == Qt.RightButton:
                     self.navigate_frame.emit("next")
                 return True
         return super().eventFilter(watched, event)
+
 
     def _apply_zoom(self, factor: float, center: QPoint):
         old_zoom = self._zoom

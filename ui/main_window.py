@@ -27,6 +27,7 @@ from ui.track_panel import TrackPanel
 from ui.controls_bar import ControlsBar
 from ui.dialogs.id_editor import IdEditorDialog
 from ui.dialogs.merge_dialog import MergeDialog, SplitDialog
+from ui.dialogs.trim_dialog import TrimDialog
 from utils import io as uio
 from utils.settings import AppSettings
 from utils.colors import APP_STYLESHEET, BG_SURFACE
@@ -140,10 +141,16 @@ class MainWindow(QMainWindow):
         self._act_undo   = QAction("&Undo", self, shortcut="Ctrl+Z")
         self._act_redo   = QAction("&Redo", self, shortcut="Ctrl+Y")
         self._act_verify = QAction("✓ Verify Frame", self, shortcut="V")
+        self._act_trim   = QAction("✂  Trim Frames…", self)
+        self._act_trim.setToolTip(
+            "Remove unwanted frames from the beginning and/or end of the sequence"
+        )
         edit_menu.addAction(self._act_undo)
         edit_menu.addAction(self._act_redo)
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_verify)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self._act_trim)
 
         # ── View ──────────────────────────────────────────────────────────
         view_menu = mb.addMenu("&View")
@@ -178,6 +185,7 @@ class MainWindow(QMainWindow):
         self._act_redo.triggered.connect(self._on_redo)
         self._act_verify.triggered.connect(self._on_verify_frame)
         self._act_export_mot.triggered.connect(self._export_mot)
+        self._act_trim.triggered.connect(self._on_trim_frames)
 
     def _rebuild_recent_menu(self):
         self._recent_menu.clear()
@@ -647,6 +655,76 @@ class MainWindow(QMainWindow):
             self._store.write_to_json()
             self._status.showMessage(f"Saved to {self._json_path}", 3000)
 
+    # ── Trim ──────────────────────────────────────────────────────────────
+
+    def _get_frame_thumbnail(self, pos: int):
+        """Return a QPixmap for the frame at 0-based position, or None."""
+        from PySide6.QtGui import QPixmap
+        if self._canvas is None:
+            return None
+        fd = self._store.get_frame_by_position(pos)
+        if fd is None:
+            return None
+        # Reuse the canvas's internal image loader
+        pix = self._canvas._load_pixmap(fd.frame_name)
+        return pix
+
+    @Slot()
+    def _on_trim_frames(self):
+        """Open the Trim Frames dialog and apply the trim on acceptance."""
+        if not self._json_path or self._store.frame_count == 0:
+            return
+
+        dlg = TrimDialog(
+            total_frames  = self._store.frame_count,
+            get_thumbnail = self._get_frame_thumbnail,
+            parent        = self,
+        )
+        if not dlg.exec():
+            return
+
+        start_pos         = dlg.result_start_pos
+        end_pos           = dlg.result_end_pos
+        delete_images     = dlg.result_delete_images
+
+        # Perform the trim — returns removed FrameData list
+        removed_frames = self._store.trim_frames(start_pos, end_pos)
+
+        # Optionally delete image files from disk
+        deleted_count = 0
+        if delete_images and self._canvas is not None:
+            frames_dir = self._canvas._frames_dir
+            for fd in removed_frames:
+                # Try common image extensions
+                for ext in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
+                    img_path = Path(frames_dir) / (fd.frame_name + ext)
+                    if img_path.exists():
+                        try:
+                            img_path.unlink()
+                            deleted_count += 1
+                        except Exception:
+                            pass
+                        break
+
+        # Reset playback and UI to the new (shorter) sequence
+        new_count = self._store.frame_count
+        self._play_ctrl.setup(new_count, 0)
+        self._controls.setup(new_count)
+        self._timeline.setup([f.frame_idx for f in self._store.all_frames()])
+        self._refresh_timeline_markers()
+        self._on_frame_position_changed(0)
+        self._refresh_statistics()
+
+        trim_start = start_pos
+        trim_end   = self._store.frame_count  # already trimmed, so this is relative
+        removed_n  = len(removed_frames)
+        msg = (
+            f"✂ Trimmed {removed_n} frame(s) — {new_count} frames remain"
+            + (f"; deleted {deleted_count} image file(s) from disk" if deleted_count else "")
+            + f" — saved to {Path(self._json_path).name}"
+        )
+        self._status.showMessage(msg, 6000)
+
     def _show_shortcuts_dialog(self):
         msg = (
             "<h3>Keyboard Shortcuts</h3>"
@@ -757,6 +835,7 @@ class MainWindow(QMainWindow):
         self._act_redo.setEnabled(False)
         self._act_verify.setEnabled(has)
         self._act_export_mot.setEnabled(has)
+        self._act_trim.setEnabled(has)
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
