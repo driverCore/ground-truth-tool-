@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QWidget, QSizePolicy
 
 from models.track_store import EffectiveDet
 from utils.colors import (
+    get_theme_colors, get_status_color,
     bbox_border_color, label_bg_color, BG_BASE, TEXT_SEC,
     STATUS_COLORS, ACCENT,
 )
@@ -64,6 +65,7 @@ class FrameCanvas(QWidget):
 
     def __init__(self, frames_dir: str, parent=None):
         super().__init__(parent)
+        self._theme       = "dark"
         self._frames_dir  = Path(frames_dir)
         self._frame_idx   = -1
         self._detections: list[EffectiveDet] = []
@@ -106,16 +108,35 @@ class FrameCanvas(QWidget):
         from PySide6.QtWidgets import QLineEdit
         self._id_editor = QLineEdit(self)
         self._id_editor.setVisible(False)
-        self._id_editor.setStyleSheet(
-            "background-color: #1f2937; color: white; border: 1px solid #3b82f6; "
-            "padding: 0px; margin: 0px; font-weight: bold; font-family: Segoe UI;"
-        )
+        self._update_id_editor_style()
         self._id_editor.setFont(self._font)
         self._id_editor.editingFinished.connect(self._on_id_editing_finished)
         self._id_editor.installEventFilter(self)
         self._editing_det_idx = None
 
     # ── Public API ────────────────────────────────────────────────────────
+
+    def set_theme(self, theme: str):
+        self._theme = theme
+        self._update_id_editor_style()
+        self.update()
+
+    def _update_id_editor_style(self):
+        colors = get_theme_colors(self._theme)
+        if self._theme == "light":
+            self._id_editor.setStyleSheet(
+                f"background-color: #ffffff; color: {colors['TEXT_PRI']}; border: 2px solid {colors['ACCENT']}; "
+                "padding: 0px; margin: 0px; font-weight: bold; font-family: Segoe UI;"
+            )
+        else:
+            self._id_editor.setStyleSheet(
+                f"background-color: #1f2937; color: white; border: 1px solid {colors['ACCENT']}; "
+                "padding: 0px; margin: 0px; font-weight: bold; font-family: Segoe UI;"
+            )
+
+    def set_frames_dir(self, frames_dir: str):
+        """Change the directory where frame images are loaded from."""
+        self._frames_dir = Path(frames_dir)
 
     def display_frame(self, frame_idx: int, detections: list[EffectiveDet],
                       frame_name: str = ""):
@@ -165,12 +186,13 @@ class FrameCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        colors = get_theme_colors(self._theme)
 
         # Background
-        painter.fillRect(self.rect(), QColor(BG_BASE))
+        painter.fillRect(self.rect(), QColor(colors["BG_BASE"]))
 
         if self._pixmap is None or self._pixmap.isNull():
-            painter.setPen(QColor(TEXT_SEC))
+            painter.setPen(QColor(colors["TEXT_SEC"]))
             painter.drawText(self.rect(), Qt.AlignCenter,
                              "No frame loaded\n\nOpen a project to begin.")
             return
@@ -194,7 +216,7 @@ class FrameCanvas(QWidget):
         if self._creating_rect:
             cx1, cy1 = self._image_to_canvas(self._creating_rect[0], self._creating_rect[1])
             cx2, cy2 = self._image_to_canvas(self._creating_rect[2], self._creating_rect[3])
-            pen = QPen(QColor(ACCENT), 2, Qt.DashLine)
+            pen = QPen(QColor(colors["ACCENT"]), 2, Qt.DashLine)
             painter.setPen(pen)
             painter.setBrush(QBrush(QColor(0, 230, 118, 40)))
             painter.drawRect(QRectF(cx1, cy1, cx2 - cx1, cy2 - cy1))
@@ -204,6 +226,7 @@ class FrameCanvas(QWidget):
 
     def _draw_bbox(self, painter: QPainter, det: EffectiveDet,
                    scale: float, ox: int, oy: int):
+        colors = get_theme_colors(self._theme)
         x1, y1, x2, y2 = det.bbox_xyxy
         cx1 = int(x1 * scale) + ox
         cy1 = int(y1 * scale) + oy
@@ -213,7 +236,7 @@ class FrameCanvas(QWidget):
         is_selected = (det.det_idx == self._selected_det)
         is_hovered  = (det.det_idx == self._hovered_det)
 
-        border = bbox_border_color(det.current_id, det.status)
+        border = bbox_border_color(det.current_id, det.status, self._theme)
         pen_w  = 3 if is_selected else (2 if is_hovered else 1)
 
         # Bbox outline
@@ -234,7 +257,7 @@ class FrameCanvas(QWidget):
             handles = self._get_handles_canvas(det)
             hs = self.HANDLE_SIZE
             painter.setPen(QPen(QColor("white"), 1))
-            painter.setBrush(QBrush(QColor(ACCENT)))
+            painter.setBrush(QBrush(QColor(colors["ACCENT"])))
             for hx, hy in handles.values():
                 painter.drawRect(hx - hs // 2, hy - hs // 2, hs, hs)
 
@@ -267,13 +290,13 @@ class FrameCanvas(QWidget):
         lx      = cx1
         ly      = max(cy1 - txt_h, 0)
 
-        bg = label_bg_color(det.current_id, det.status)
+        bg = label_bg_color(det.current_id, det.status, self._theme)
         painter.fillRect(lx, ly, txt_w, txt_h, bg)
         painter.setPen(QColor("white"))
         painter.drawText(lx + 4, ly + txt_h - 4, label)
 
         # Status dot
-        status_c = STATUS_COLORS.get(det.status, QColor("grey"))
+        status_c = get_status_color(det.status, self._theme)
         painter.setBrush(QBrush(status_c))
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(cx2 - 10, cy1 + 2, 8, 8)
@@ -281,6 +304,7 @@ class FrameCanvas(QWidget):
     def _draw_info_overlay(self, painter: QPainter):
         if self._frame_idx < 0:
             return
+        colors = get_theme_colors(self._theme)
         text = f"Frame {self._frame_idx + 1}"
         if self._create_mode:
             text += "  [ADD BOX MODE]"
@@ -292,9 +316,10 @@ class FrameCanvas(QWidget):
         rx     = margin
         ry     = self.height() - margin - th
 
-        bg = QColor(0, 0, 0, 160)
+        bg = QColor(0, 0, 0, 160) if self._theme == "dark" else QColor(255, 255, 255, 210)
         painter.fillRect(rx, ry, tw, th, bg)
-        painter.setPen(QColor("white"))
+        text_pen = QColor("white") if self._theme == "dark" else QColor(colors["TEXT_PRI"])
+        painter.setPen(text_pen)
         painter.drawText(rx + 6, ry + th - 4, text)
 
     # ── Geometry & Transform Helpers ──────────────────────────────────────
@@ -611,6 +636,7 @@ class FrameCanvas(QWidget):
             self.setCursor(self.HANDLE_CURSORS[h_name])
             return
 
+        det_idx = None
         # Check if mouse is over any label or button
         hit_label_det = self._hit_test_label(cx, cy)
         btn_rect = self._get_cancel_btn_rect()
@@ -621,7 +647,7 @@ class FrameCanvas(QWidget):
 
         if over_btn:
             # Keep current hovered/selected detection active
-            pass
+            det_idx = self._hovered_det
         elif hit_label_det is not None:
             if hit_label_det != self._hovered_det:
                 self._hovered_det = hit_label_det

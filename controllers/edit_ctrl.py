@@ -190,13 +190,75 @@ class EditController(QObject):
 
     # ── Change Class ──────────────────────────────────────────────────────
     def change_class(self, frame_idx: int, det_idx: int, old_cls_id: int, old_cls_name: str,
-                     new_cls_id: int, new_cls_name: str) -> bool:
-        if (old_cls_id, old_cls_name) == (new_cls_id, new_cls_name):
+                     new_cls_id: int, new_cls_name: str,
+                     propagate: bool = True) -> bool:
+        # A same-class pick is only a no-op for single-frame edits; with propagation
+        # it still pushes the label onto later frames that disagree.
+        if not propagate and (old_cls_id, old_cls_name) == (new_cls_id, new_cls_name):
             return False
-        cmd = ChangeClassCommand(self._store, frame_idx, det_idx, old_cls_id, old_cls_name, new_cls_id, new_cls_name)
+
+        tracks = self._store.get_frame_tracks(frame_idx)
+        src_det = next((d for d in tracks if d.det_idx == det_idx), None)
+        if src_det is None:
+            return False
+
+        target_id = src_det.current_id
+        target_orig_id = src_det.original_id
+
+        changes = []
+        if not propagate:
+            cls_edits = self._store._class_edits.get(frame_idx, {})
+            was_in_edits = det_idx in cls_edits
+            prior_edit = cls_edits.get(det_idx, None)
+            changes.append((
+                frame_idx, det_idx, old_cls_id, old_cls_name,
+                new_cls_id, new_cls_name, was_in_edits, prior_edit
+            ))
+        else:
+            # Automatically update all subsequent frames (frame_idx .. end) for this track ID
+            for f in self._store.all_frames():
+                fi = f.frame_idx
+                if fi < frame_idx:
+                    continue
+
+                eff = self._store.get_frame_tracks(fi)
+                matched_det = next((d for d in eff if d.current_id == target_id), None)
+                if matched_det is None:
+                    matched_det = next((d for d in eff if d.original_id == target_orig_id and d.current_id == target_id), None)
+
+                if matched_det is not None and (matched_det.class_id, matched_det.class_name) != (new_cls_id, new_cls_name):
+                    di = matched_det.det_idx
+                    cls_edits = self._store._class_edits.get(fi, {})
+                    was_in_edits = di in cls_edits
+                    prior_edit = cls_edits.get(di, None)
+                    changes.append((
+                        fi, di, matched_det.class_id, matched_det.class_name,
+                        new_cls_id, new_cls_name, was_in_edits, prior_edit
+                    ))
+
+        if not changes:
+            return False
+
+        cmd = ChangeClassCommand(self._store, changes, track_id=target_id)
         self._history.push(cmd)
+
+        for fi, di, _, prev_cls_name, _, _, _, _ in changes:
+            self._log.append({
+                "timestamp":      datetime.now().isoformat(),
+                "frame_idx":      fi,
+                "frame_name":     self._store.get_frame_data(fi).frame_name if self._store.get_frame_data(fi) else "",
+                "det_idx":        di,
+                "track_id":       target_id,
+                "original_class": prev_cls_name,
+                "corrected_class": new_cls_name,
+                "scope":          "forward" if propagate else "frame",
+            })
+
         self._flush()
-        self.tracks_changed.emit(frame_idx)
+
+        affected_frames = {fi for fi, _, _, _, _, _, _, _ in changes}
+        for fi in affected_frames:
+            self.tracks_changed.emit(fi)
         self.history_changed.emit()
         self.project_modified.emit()
         self.statistics_changed.emit()

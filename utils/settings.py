@@ -70,3 +70,10 @@ class AppSettings:
 
     def clear_crash_recovery(self):
         self._s.remove("crash_recovery_project")
+
+    # ── Theme preferences ──────────────────────────────────────────────────
+    def get_theme(self) -> str:
+        return str(self._s.value("app_theme", "dark"))
+
+    def set_theme(self, theme: str):
+        self._s.setValue("app_theme", theme)

@@ -5,7 +5,10 @@ from PySide6.QtCore import Qt, Signal, QRect, QPoint, QSize
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QFontMetrics, QMouseEvent, QPolygon
 from PySide6.QtWidgets import QWidget, QSizePolicy, QToolTip
 
-from utils.colors import TIMELINE_COLORS, BG_SURFACE, BG_WIDGET, BORDER, ACCENT, TEXT_SEC
+from utils.colors import (
+    get_theme_colors, get_timeline_colors,
+    TIMELINE_COLORS, BG_SURFACE, BG_WIDGET, BORDER, ACCENT, TEXT_SEC,
+)
 
 
 class TimelineWidget(QWidget):
@@ -27,6 +30,7 @@ class TimelineWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._theme          = "dark"
         self._frame_count    = 0
         self._current_pos    = 0          # 0-based list position
         self._start_pos      = 0          # sliding window start position
@@ -46,6 +50,10 @@ class TimelineWidget(QWidget):
         self._font = QFont("Segoe UI", 8)
 
     # ── Public API ────────────────────────────────────────────────────────
+
+    def set_theme(self, theme: str):
+        self._theme = theme
+        self.update()
 
     def setup(self, frame_idx_list: list[int]):
         self._frame_idx_list = list(frame_idx_list)
@@ -93,19 +101,21 @@ class TimelineWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         W, H = self.width(), self.height()
+        colors = get_theme_colors(self._theme)
 
         # Background
-        painter.fillRect(0, 0, W, H, QColor(BG_SURFACE))
+        painter.fillRect(0, 0, W, H, QColor(colors["BG_SURFACE"]))
 
         # Track bar background
         bar_y = 16
-        painter.fillRect(0, bar_y, W, self.BAR_HEIGHT, QColor(BG_WIDGET))
+        painter.fillRect(0, bar_y, W, self.BAR_HEIGHT, QColor(colors["BG_WIDGET"]))
 
         # Active sliding window highlight
         start_x = self._pos_to_x(self._start_pos)
         end_x   = self._pos_to_x(self._end_pos)
         if start_x <= end_x:
-            painter.fillRect(start_x, bar_y, max(1, end_x - start_x + 1), self.BAR_HEIGHT, QColor(49, 130, 206, 45))
+            win_color = QColor(49, 130, 206, 45) if self._theme == "dark" else QColor(9, 105, 218, 35)
+            painter.fillRect(start_x, bar_y, max(1, end_x - start_x + 1), self.BAR_HEIGHT, win_color)
 
         # Markers inside window
         for pos, fidx in enumerate(self._frame_idx_list):
@@ -114,10 +124,11 @@ class TimelineWidget(QWidget):
             self._draw_marker(painter, x, bar_y, fidx, active=is_active)
 
         # Dimmed overlays outside sliding window
+        dim_color = QColor(0, 0, 0, 160) if self._theme == "dark" else QColor(220, 225, 232, 175)
         if start_x > 0:
-            painter.fillRect(0, bar_y, start_x, self.BAR_HEIGHT, QColor(0, 0, 0, 160))
+            painter.fillRect(0, bar_y, start_x, self.BAR_HEIGHT, dim_color)
         if end_x < W - 1:
-            painter.fillRect(end_x + 1, bar_y, W - end_x - 1, self.BAR_HEIGHT, QColor(0, 0, 0, 160))
+            painter.fillRect(end_x + 1, bar_y, W - end_x - 1, self.BAR_HEIGHT, dim_color)
 
         # Range Handles: Start handle (Green) and End handle (Red)
         # Left Start Handle [
@@ -151,9 +162,10 @@ class TimelineWidget(QWidget):
         painter.setPen(QColor("#e53e3e"))
         painter.drawText(min(W - 10, end_x - 4), bar_y - 14, "E")
 
-        # Current position indicator (white line + triangle)
+        # Current position indicator
+        curr_line_c = QColor("white") if self._theme == "dark" else QColor("#0969da")
         cx = self._pos_to_x(self._current_pos)
-        painter.setPen(QPen(QColor("white"), 2))
+        painter.setPen(QPen(curr_line_c, 2))
         painter.drawLine(cx, bar_y - 4, cx, bar_y + self.BAR_HEIGHT + 4)
 
         # Triangle above bar for current position
@@ -163,19 +175,20 @@ class TimelineWidget(QWidget):
             QPoint(tri_x + 5, tri_y - 8),
             QPoint(tri_x,     tri_y),
         ])
-        painter.setBrush(QBrush(QColor("white")))
+        painter.setBrush(QBrush(curr_line_c))
         painter.setPen(Qt.NoPen)
         painter.drawPolygon(tri_curr)
 
         # Hover indicator
         if 0 <= self._hover_pos < self._frame_count:
             hx = self._pos_to_x(self._hover_pos)
-            painter.setPen(QPen(QColor(255, 255, 255, 80), 1))
+            hover_c = QColor(255, 255, 255, 80) if self._theme == "dark" else QColor(0, 0, 0, 70)
+            painter.setPen(QPen(hover_c, 1))
             painter.drawLine(hx, bar_y, hx, bar_y + self.BAR_HEIGHT)
 
         # Labels: first, current, last frame numbers
         painter.setFont(self._font)
-        painter.setPen(QColor(TEXT_SEC))
+        painter.setPen(QColor(colors["TEXT_SEC"]))
         if self._frame_idx_list:
             fm = QFontMetrics(self._font)
             first_label = str(self._frame_idx_list[0] + 1)
@@ -185,17 +198,18 @@ class TimelineWidget(QWidget):
             tw = fm.horizontalAdvance(last_label)
             painter.drawText(W - tw - 2, H - 2, last_label)
             tw2 = fm.horizontalAdvance(curr_label)
-            painter.setPen(QColor("white"))
+            painter.setPen(QColor("white") if self._theme == "dark" else QColor(colors["TEXT_PRI"]))
             painter.drawText(max(0, cx - tw2 // 2), H - 2, curr_label)
 
     def _draw_marker(self, painter: QPainter, x: int, bar_y: int, fidx: int, active: bool = True):
         # Priority: switch > edited > verified
+        tl_colors = get_timeline_colors(self._theme)
         if fidx in self._switch_frames:
-            color = TIMELINE_COLORS["switch"]
+            color = tl_colors["switch"]
         elif fidx in self._edited_frames:
-            color = TIMELINE_COLORS["edited"]
+            color = tl_colors["edited"]
         elif fidx in self._verified_frames:
-            color = TIMELINE_COLORS["verified"]
+            color = tl_colors["verified"]
         else:
             return   # unreviewed — no marker
 

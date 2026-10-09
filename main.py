@@ -45,9 +45,11 @@ def _run():
     app.setOrganizationName("KabaddiBTP")
     app.setApplicationDisplayName("Kabaddi GT Track Editor")
 
-    # Apply stylesheet after imports
-    from utils.colors import APP_STYLESHEET
-    app.setStyleSheet(APP_STYLESHEET)
+    # Apply stylesheet from saved user preferences
+    from utils.settings import AppSettings
+    from utils.colors import get_app_stylesheet
+    settings = AppSettings()
+    app.setStyleSheet(get_app_stylesheet(settings.get_theme()))
 
     font = QFont("Segoe UI", 10)
     app.setFont(font)

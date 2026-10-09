@@ -8,10 +8,12 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QGroupBox, QFrame, QComboBox, QSpinBox,
+    QCheckBox,
 )
 
 from models.track_store import EffectiveDet, TrackStore
 from utils.colors import (
+    get_theme_colors, get_status_color,
     track_color, STATUS_COLORS, ACCENT, WARNING, DANGER,
     TEXT_SEC, BG_PANEL, BG_SURFACE,
 )
@@ -40,19 +42,18 @@ class TrackPanel(QWidget):
     track_selected         = Signal(int)         # det_idx
     delete_box_requested   = Signal(int, int)   # det_idx, frame_idx
     add_box_requested      = Signal(int)         # frame_idx
-    change_class_requested = Signal(int, int, int, str) # det_idx, frame_idx, cls_id, cls_name
+    change_class_requested = Signal(int, int, int, str, bool) # det_idx, frame_idx, cls_id, cls_name, propagate
     range_bounds_changed   = Signal(int, int)   # 1-based start, end
     range_reset_requested  = Signal()
 
     CLASSES = [
-        (0, "player"),
-        (1, "referee"),
-        (2, "defender"),
-        (3, "raider"),
+        (0, "raider"),
+        (1, "defender"),
     ]
 
     def __init__(self, store: TrackStore, parent=None):
         super().__init__(parent)
+        self._theme       = "dark"
         self._store       = store
         self._frame_idx   = -1
         self._detections: list[EffectiveDet] = []
@@ -60,6 +61,14 @@ class TrackPanel(QWidget):
         self.setMinimumWidth(270)
         self.setMaximumWidth(350)
         self._build_ui()
+
+    def set_theme(self, theme: str):
+        self._theme = theme
+        colors = get_theme_colors(theme)
+        if hasattr(self, "_hint"):
+            self._hint.setStyleSheet(f"font-size: 11px; color: {colors['TEXT_SEC']};")
+        self._refresh_track_list()
+        self._refresh_selected_panel(self._selected)
 
     # ── Build UI ──────────────────────────────────────────────────────────
 
@@ -98,10 +107,20 @@ class TrackPanel(QWidget):
         self._combo_class = QComboBox()
         for cid, cname in self.CLASSES:
             self._combo_class.addItem(f"{cid}: {cname}", (cid, cname))
-        self._combo_class.currentIndexChanged.connect(self._on_class_changed)
+        # `activated` fires on user selection even if the same class is re-picked,
+        # so re-selecting the current class can still propagate it forward.
+        self._combo_class.activated.connect(self._on_class_changed)
         class_row.addWidget(lbl_c)
         class_row.addWidget(self._combo_class, stretch=1)
         sg.addLayout(class_row)
+
+        self._chk_propagate_class = QCheckBox("Propagate to subsequent frames")
+        self._chk_propagate_class.setChecked(True)
+        self._chk_propagate_class.setToolTip(
+            "Automatically update this track ID's class (raider/defender) in all subsequent frames"
+        )
+        self._chk_propagate_class.setStyleSheet("font-size: 11px; color: #a0aec0; margin-left: 95px;")
+        sg.addWidget(self._chk_propagate_class)
 
         _, self._lbl_status   = lrow("Status")
         _, self._lbl_bbox     = lrow("Bounding Box")
@@ -153,11 +172,11 @@ class TrackPanel(QWidget):
         tg = QVBoxLayout(self._grp_trim)
         tg.setSpacing(4)
 
-        hint = QLabel("Trim frames from start & end. Only active window frames are saved to tracks.json.")
-        hint.setWordWrap(True)
-        hint.setObjectName("label_secondary")
-        hint.setStyleSheet("font-size: 11px; color: #a0aec0;")
-        tg.addWidget(hint)
+        self._hint = QLabel("Trim frames from start & end. Only active window frames are saved to tracks.json.")
+        self._hint.setWordWrap(True)
+        self._hint.setObjectName("label_secondary")
+        self._hint.setStyleSheet("font-size: 11px; color: #8b949e;")
+        tg.addWidget(self._hint)
 
         trim_row = QHBoxLayout()
         trim_row.addWidget(QLabel("Start:"))
@@ -264,7 +283,8 @@ class TrackPanel(QWidget):
             span_s, span_e, length = self._store.get_original_id_span(det.original_id)
             status_sym = {"verified": "●", "edited": "◑", "unreviewed": "○"}.get(det.status, "○")
             color_hex  = track_color(det.current_id).name()
-            text = f"{status_sym}  ID {det.current_id:>3}  ·  frames {span_s+1}–{span_e+1}  ({length}f)"
+            cls_badge  = f" [{det.class_name}]" if det.class_name else ""
+            text = f"{status_sym}  ID {det.current_id:>3}{cls_badge}  ·  frames {span_s+1}–{span_e+1}  ({length}f)"
             if det.original_id != det.current_id:
                 text += f"  [was {det.original_id}]"
             item = QListWidgetItem(text)
@@ -297,16 +317,17 @@ class TrackPanel(QWidget):
         self._lbl_orig_id.setText(str(det.original_id))
 
         self._combo_class.blockSignals(True)
-        matched_idx = 0
+        matched_idx = 1  # Default to defender if unspecified
         for i, (cid, cname) in enumerate(self.CLASSES):
-            if det.class_id == cid or det.class_name == cname:
+            if det.class_id == cid or str(det.class_name).lower() == cname.lower():
                 matched_idx = i
                 break
         self._combo_class.setCurrentIndex(matched_idx)
         self._combo_class.blockSignals(False)
 
         self._lbl_status.setText(status_text)
-        self._lbl_status.setStyleSheet(f"color: {STATUS_COLORS.get(det.status, '#e2e8f0')};")
+        status_c = get_status_color(det.status, self._theme).name()
+        self._lbl_status.setStyleSheet(f"color: {status_c};")
 
         self._lbl_bbox.setText(f"({x1}, {y1}) → ({x2}, {y2})  [{x2-x1}×{y2-y1}]")
         self._lbl_conf.setText(f"{det.conf:.2f}")
@@ -320,6 +341,7 @@ class TrackPanel(QWidget):
         self._btn_split.setEnabled(enabled)
         self._btn_delete_box.setEnabled(enabled)
         self._combo_class.setEnabled(enabled)
+        self._chk_propagate_class.setEnabled(enabled)
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
@@ -355,8 +377,9 @@ class TrackPanel(QWidget):
     def _on_class_changed(self, idx: int):
         if self._selected and idx >= 0:
             cid, cname = self.CLASSES[idx]
+            propagate = self._chk_propagate_class.isChecked()
             self.change_class_requested.emit(
-                self._selected.det_idx, self._frame_idx, cid, cname
+                self._selected.det_idx, self._frame_idx, cid, cname, propagate
             )
 
     def _on_trim_spin_changed(self):

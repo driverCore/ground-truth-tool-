@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Any
 
 if TYPE_CHECKING:
     from models.track_store import TrackStore
@@ -151,25 +151,59 @@ class MoveResizeBboxCommand(Command):
 
 
 class ChangeClassCommand(Command):
-    """Change detection class ID and class name."""
+    """Change detection class ID and class name across one or multiple frames."""
 
-    def __init__(self, store: "TrackStore", frame_idx: int, det_idx: int,
-                 old_cls_id: int, old_cls_name: str,
-                 new_cls_id: int, new_cls_name: str):
+    def __init__(self, store: "TrackStore",
+                 changes_or_frame: Any,
+                 det_idx: Optional[int] = None,
+                 old_cls_id: Optional[int] = None,
+                 old_cls_name: Optional[str] = None,
+                 new_cls_id: Optional[int] = None,
+                 new_cls_name: Optional[str] = None,
+                 track_id: Optional[int] = None,
+                 desc: str = ""):
         self._store = store
-        self._frame_idx = frame_idx
-        self._det_idx = det_idx
-        self._old_cls_id = old_cls_id
-        self._old_cls_name = old_cls_name
-        self._new_cls_id = new_cls_id
-        self._new_cls_name = new_cls_name
-        self.description = f"Change class det {det_idx} → {new_cls_name}"
+        if isinstance(changes_or_frame, list):
+            # List of (frame_idx, det_idx, old_cls_id, old_cls_name, new_cls_id, new_cls_name, was_in_edits, prior_edit)
+            self._changes = changes_or_frame
+            self._track_id = track_id
+            if desc:
+                self.description = desc
+            elif self._changes:
+                target_label = f"ID {track_id}" if track_id is not None else f"det {self._changes[0][1]}"
+                cls_lbl = self._changes[0][5]
+                n_frames = len(self._changes)
+                if n_frames > 1:
+                    self.description = f"Change class {target_label} → {cls_lbl} ({n_frames} frames)"
+                else:
+                    self.description = f"Change class {target_label} → {cls_lbl}"
+            else:
+                self.description = "Change class"
+        else:
+            # Single frame legacy call
+            frame_idx = changes_or_frame
+            cls_edits = self._store._class_edits.get(frame_idx, {})
+            was_in_edits = det_idx in cls_edits
+            prior_edit = cls_edits.get(det_idx, None)
+            self._changes = [(
+                frame_idx, det_idx, old_cls_id, old_cls_name,
+                new_cls_id, new_cls_name, was_in_edits, prior_edit
+            )]
+            self._track_id = track_id
+            self.description = desc or f"Change class det {det_idx} → {new_cls_name}"
 
     def execute(self):
-        self._store.set_class_edit(self._frame_idx, self._det_idx, self._new_cls_id, self._new_cls_name)
+        for item in self._changes:
+            fi, di, _, _, new_id, new_name, _, _ = item
+            self._store.set_class_edit(fi, di, new_id, new_name)
 
     def undo(self):
-        self._store.set_class_edit(self._frame_idx, self._det_idx, self._old_cls_id, self._old_cls_name)
+        for item in self._changes:
+            fi, di, old_id, old_name, _, _, was_in_edits, prior_edit = item
+            if was_in_edits and prior_edit is not None:
+                self._store.set_class_edit(fi, di, prior_edit[0], prior_edit[1])
+            else:
+                self._store.clear_class_edit(fi, di)
 
 
 class AddDetectionCommand(Command):

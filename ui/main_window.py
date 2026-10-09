@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QKeySequence, QCloseEvent
+from PySide6.QtGui import QAction, QKeySequence, QCloseEvent, QActionGroup
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QFileDialog, QMessageBox, QLabel, QInputDialog, QStatusBar, QApplication,
+    QPushButton,
 )
 
 from models.track_store import TrackStore
@@ -30,7 +31,7 @@ from ui.dialogs.merge_dialog import MergeDialog, SplitDialog
 from ui.dialogs.trim_dialog import TrimDialog
 from utils import io as uio
 from utils.settings import AppSettings
-from utils.colors import APP_STYLESHEET, BG_SURFACE
+from utils.colors import get_app_stylesheet, get_theme_colors, APP_STYLESHEET, BG_SURFACE
 
 
 class MainWindow(QMainWindow):
@@ -39,6 +40,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._settings  = AppSettings()
+        self._current_theme = self._settings.get_theme()
         self._json_path: Optional[str] = None   # currently open tracks.json
         self._store     = TrackStore()
         self._history   = History()
@@ -48,6 +50,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menus()
+        self._apply_theme(self._current_theme, save=False)
         self._connect_stable_signals()
         self._setup_shortcuts()
         self._restore_geometry()
@@ -90,16 +93,16 @@ class MainWindow(QMainWindow):
         root.addWidget(self._main_splitter, stretch=1)
 
         # ── Bottom: controls + timeline ───────────────────────────────────
-        bottom = QWidget()
-        bottom.setStyleSheet(f"background:{BG_SURFACE};")
-        bl = QVBoxLayout(bottom)
+        self._bottom_container = QWidget()
+        self._bottom_container.setStyleSheet(f"background:{BG_SURFACE};")
+        bl = QVBoxLayout(self._bottom_container)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(0)
         self._controls = ControlsBar()
         self._timeline = TimelineWidget()
         bl.addWidget(self._controls)
         bl.addWidget(self._timeline)
-        root.addWidget(bottom)
+        root.addWidget(self._bottom_container)
 
         # ── Status bar ────────────────────────────────────────────────────
         self._status = QStatusBar()
@@ -124,6 +127,10 @@ class MainWindow(QMainWindow):
         self._act_open = QAction("&Open tracks.json…", self, shortcut="Ctrl+O")
         self._act_open.setToolTip("Open any ByteTrack tracks.json to edit IDs")
         file_menu.addAction(self._act_open)
+
+        self._act_open_frames = QAction("Open &Frames Folder…", self)
+        self._act_open_frames.setToolTip("Manually select the folder containing the background frames")
+        file_menu.addAction(self._act_open_frames)
 
         file_menu.addSeparator()
 
@@ -167,6 +174,33 @@ class MainWindow(QMainWindow):
         act_fs = QAction("Full&screen", self, shortcut="F11")
         act_fs.triggered.connect(self._toggle_fullscreen)
         view_menu.addAction(act_fs)
+        view_menu.addSeparator()
+
+        # Theme Submenu & Action
+        theme_menu = view_menu.addMenu("🌓 &Theme")
+        self._act_theme_dark = QAction("🌙 &Dark Mode (Default)", self, checkable=True)
+        self._act_theme_light = QAction("☀️ &Light Mode", self, checkable=True)
+
+        theme_group = QActionGroup(self)
+        theme_group.addAction(self._act_theme_dark)
+        theme_group.addAction(self._act_theme_light)
+
+        self._act_theme_dark.triggered.connect(lambda: self._apply_theme("dark"))
+        self._act_theme_light.triggered.connect(lambda: self._apply_theme("light"))
+
+        theme_menu.addAction(self._act_theme_dark)
+        theme_menu.addAction(self._act_theme_light)
+
+        self._act_toggle_theme = QAction("🌓 Toggle Light / Dark Mode", self, shortcut="Ctrl+T")
+        self._act_toggle_theme.triggered.connect(self._toggle_theme)
+        view_menu.addAction(self._act_toggle_theme)
+
+        # Top-Right Corner Theme Toggle Button
+        self._btn_theme_toggle = QPushButton("🌙 Dark")
+        self._btn_theme_toggle.setObjectName("btn_theme_toggle")
+        self._btn_theme_toggle.setToolTip("Click to toggle Dark / Light Theme (Ctrl+T)")
+        self._btn_theme_toggle.clicked.connect(self._toggle_theme)
+        mb.setCornerWidget(self._btn_theme_toggle, Qt.TopRightCorner)
 
         # ── Export ────────────────────────────────────────────────────────
         export_menu = mb.addMenu("E&xport")
@@ -181,6 +215,7 @@ class MainWindow(QMainWindow):
 
         # ── Connect menu actions ───────────────────────────────────────────
         self._act_open.triggered.connect(self._on_open)
+        self._act_open_frames.triggered.connect(self._on_open_frames_folder)
         self._act_undo.triggered.connect(self._on_undo)
         self._act_redo.triggered.connect(self._on_redo)
         self._act_verify.triggered.connect(self._on_verify_frame)
@@ -307,6 +342,9 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("A"), self).activated.connect(self._on_shortcut_step_backward)
         QShortcut(QKeySequence("D"), self).activated.connect(self._on_shortcut_step_forward)
 
+        # Theme toggle shortcut
+        QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(self._toggle_theme)
+
     # ── Open / Load ───────────────────────────────────────────────────────
 
     def _on_open(self):
@@ -341,7 +379,19 @@ class MainWindow(QMainWindow):
         self._connect_edit_ctrl_signals()
 
         # Auto-detect frames directory
-        frames_dir = self._detect_frames_dir(json_path)
+        # Priority 0: read frames_folder embedded directly in the JSON records
+        frames_dir = ""
+        if records and isinstance(records[0], dict):
+            embedded = records[0].get("frames_folder", "")
+            if embedded:
+                p_emb = Path(embedded)
+                if p_emb.is_dir():
+                    frames_dir = str(p_emb.resolve())
+                elif (Path(json_path).parent / p_emb).is_dir():
+                    frames_dir = str((Path(json_path).parent / p_emb).resolve())
+        if not frames_dir:
+            frames_dir = self._detect_frames_dir(json_path)
+
         if not frames_dir:
             frames_dir = QFileDialog.getExistingDirectory(
                 self, "Select Frames Directory (could not auto-detect)",
@@ -363,6 +413,7 @@ class MainWindow(QMainWindow):
             self._canvas_placeholder.hide()
 
         self._canvas = FrameCanvas(frames_dir)
+        self._canvas.set_theme(self._current_theme)
         self._canvas.detection_clicked.connect(self._on_detection_clicked)
         self._canvas.bbox_edited.connect(self._on_bbox_edited)
         self._canvas.detection_created.connect(self._on_detection_created)
@@ -401,44 +452,120 @@ class MainWindow(QMainWindow):
     def _detect_frames_dir(json_path: str) -> str:
         """Auto-detect frames directory from tracks.json path.
 
-        Naming convention:
-          .../raid/toe touch/bytetrack_tt_1_frames/tracks.json
-          →  .../raid/toe touch/frames/tt_1_frames/
-
-        Also tries the json's parent directory directly.
+        Handles:
+          - Standard dataset paths: dhruba_dataset_processed/raid/toe_touch/bytetrack/bytetrack_toe1_frames/tracks.json
+          - Staging paths: class_labelled_ground_truth/dhruba_dataset_processed/.../tracks.json
+          - Ambiguous flat paths: ambiguous/videos/ak6/tracks.json
+          - Ambiguous class paths: ambiguous/by_class/defend/ankle_hold/bytetrack_ak6_frames/tracks.json
         """
-        p = Path(json_path).parent
-        folder = p.name   # e.g. "bytetrack_tt_1_frames"
+        p = Path(json_path).resolve()
+        folder = p.parent.name
+        vid_target = folder.replace("bytetrack_", "").replace("_frames", "")
 
-        # Strategy 1: strip "bytetrack_" prefix → look in class directory's "frames/" dir
+        # Strategy -2: Check embedded frames_folder in JSON records
+        try:
+            import json as _json
+            with open(json_path, "r", encoding="utf-8") as _f:
+                _data = _json.load(_f)
+                if isinstance(_data, list) and _data and isinstance(_data[0], dict):
+                    _emb = _data[0].get("frames_folder", "")
+                    if _emb:
+                        _p_emb = Path(_emb)
+                        if _p_emb.is_dir():
+                            return str(_p_emb.resolve())
+                        _rel = (p.parent / _p_emb).resolve()
+                        if _rel.is_dir():
+                            return str(_rel)
+        except Exception:
+            pass
+
+        # Strategy -1: If the folder containing the JSON has images, use it directly.
+        # Handles custom folders like 'exception' or 'exception2'.
+        if list(p.parent.glob("*.jpg")) or list(p.parent.glob("*.png")):
+            return str(p.parent)
+
+        # Strategy -1b: If a 'frames' or 'source_frames' subfolder exists alongside tracks.json, use it
+        for sub in ("frames", "source_frames"):
+            cand = p.parent / sub
+            if cand.is_dir() and (list(cand.glob("*.jpg")) or list(cand.glob("*.png"))):
+                return str(cand.resolve())
+
+        # Strategy -1c: Check parent's 'frames' or 'source_frames' directory (e.g. diagnostic_analysis/frames/C01)
+        for parent_sub in ("frames", "source_frames"):
+            cand = p.parent.parent / parent_sub / folder
+            if cand.is_dir() and (list(cand.glob("*.jpg")) or list(cand.glob("*.png"))):
+                return str(cand.resolve())
+
+        # Strategy 0a: Diagnostic case mapping
+        case_map = {
+            "C01": "dubki16", "C02": "toe1", "C03": "dubki36", "C04": "lionjump20",
+            "C05": "lionjump25", "C06": "toe48", "C07": "toe21", "C08": "block54",
+            "C09": "wh19", "C10": "dash45",
+        }
+        if folder in case_map:
+            vid_target = case_map[folder]
+
+        # Find project root by searching upwards for dhruba_dataset_processed
+        project_root = p.parent
+        while project_root.parent != project_root:
+            if (project_root / "dhruba_dataset_processed").is_dir():
+                break
+            project_root = project_root.parent
+
+        if not (project_root / "dhruba_dataset_processed").is_dir():
+            # Fallback to file location's root
+            project_root = Path(__file__).resolve().parent.parent.parent
+
+        dataset_root = project_root / "dhruba_dataset_processed"
+
+        # Strategy 0: Direct search by video name in dhruba_dataset_processed
+        if dataset_root.is_dir() and vid_target:
+            # Look for exact '{vid_target}_frames'
+            exact_matches = list(dataset_root.glob(f"**/frames/{vid_target}_frames"))
+            if exact_matches and exact_matches[0].is_dir():
+                return str(exact_matches[0])
+
+            # Look for partial matches containing vid_target
+            partial_matches = list(dataset_root.glob(f"**/frames/*{vid_target}*_frames"))
+            if partial_matches and partial_matches[0].is_dir():
+                return str(partial_matches[0])
+
+        # Strategy 1: Check manifest.json if path is inside ambiguous directory
+        manifest_path = project_root / "ambiguous" / "manifest.json"
+        if manifest_path.exists():
+            try:
+                import json as _j
+                manifest = _j.loads(manifest_path.read_text(encoding="utf-8"))
+                for item in manifest:
+                    if item.get("video") == vid_target or item.get("flat_path") in str(json_path):
+                        f_dir_rel = item.get("frames_dir", "")
+                        f_dir_abs = project_root / f_dir_rel
+                        if f_dir_abs.is_dir():
+                            return str(f_dir_abs)
+            except Exception:
+                pass
+
+        # Strategy 2: Relative class directory structure (ClassName / frames / sub)
         if folder.startswith("bytetrack_"):
-            sub = folder[len("bytetrack_"):]   # e.g., "th52_frames"
-            
-            # The structure is: ClassName / bytetrack / bytetrack_th52_frames / tracks.json
-            # So p.parent.parent is the ClassName directory
-            if p.parent.name == "bytetrack":
-                class_dir = p.parent.parent
+            sub = folder[len("bytetrack_"):]
+            if p.parent.parent.name == "bytetrack":
+                class_dir = p.parent.parent.parent
             else:
-                class_dir = p.parent # Fallback for old structure
-
+                class_dir = p.parent.parent
             candidate = class_dir / "frames" / sub
             if candidate.is_dir():
                 return str(candidate)
 
-        # Strategy 2: look for any directory with "frames" or "frame" in name within the class directory
-        if p.parent.name == "bytetrack":
-            class_dir = p.parent.parent
+        # Strategy 3: Parent frames directory
+        if p.parent.parent.name == "bytetrack":
+            class_dir = p.parent.parent.parent
         else:
-            class_dir = p.parent
-
+            class_dir = p.parent.parent
         frames_parent = class_dir / "frames"
         if frames_parent.is_dir():
-            # Try to find an exact match first if we failed above
             candidate = frames_parent / folder.replace("bytetrack_", "")
             if candidate.is_dir():
                 return str(candidate)
-                
-            # Otherwise just pick any child
             children = [c for c in frames_parent.iterdir() if c.is_dir()]
             if children:
                 return str(children[0])
@@ -479,6 +606,25 @@ class MainWindow(QMainWindow):
     @Slot(int, int)
     def _on_detection_clicked(self, det_idx: int, frame_idx: int):
         self._track_panel.set_selected_detection(det_idx, frame_idx)
+
+    # ── Open Frames Folder ────────────────────────────────────────────────
+
+    @Slot()
+    def _on_open_frames_folder(self):
+        """Let user manually pick the folder with background frame images."""
+        if not self._json_path:
+            QMessageBox.information(self, "No JSON Loaded",
+                                   "Please open a tracks.json file first.")
+            return
+        from PySide6.QtWidgets import QFileDialog
+        last = self._settings.get_last_dir() or str(Path.home())
+        path = QFileDialog.getExistingDirectory(self, "Select Frames Folder", last)
+        if path:
+            self._canvas.set_frames_dir(path)
+            self._status.showMessage(f"Frames folder set to: {path}", 5000)
+            # Refresh current frame display
+            if self._store.frame_count > 0:
+                self._on_frame_position_changed(self._play_ctrl.current_position)
 
     # ── Edit actions ──────────────────────────────────────────────────────
 
@@ -637,13 +783,28 @@ class MainWindow(QMainWindow):
         if not curr:
             self._status.showMessage("Add Box Mode: Click and drag on empty image space to draw a box.", 4000)
 
-    def _on_change_class(self, det_idx: int, frame_idx: int, new_cls_id: int, new_cls_name: str):
+    def _on_change_class(self, det_idx: int, frame_idx: int, new_cls_id: int, new_cls_name: str, propagate: bool = True):
         tracks = self._store.get_frame_tracks(frame_idx)
         det = next((d for d in tracks if d.det_idx == det_idx), None)
         if det:
-            self._edit_ctrl.change_class(
-                frame_idx, det_idx, det.class_id, det.class_name, new_cls_id, new_cls_name
+            target_id = det.current_id
+            ok = self._edit_ctrl.change_class(
+                frame_idx, det_idx, det.class_id, det.class_name, new_cls_id, new_cls_name, propagate=propagate
             )
+            if not ok:
+                if propagate:
+                    self._status.showMessage(
+                        f"ID {target_id} is already '{new_cls_name}' on this and all subsequent frames.", 3000
+                    )
+            else:
+                if propagate:
+                    self._status.showMessage(
+                        f"Updated class for ID {target_id} to '{new_cls_name}' across all subsequent frames.", 4000
+                    )
+                else:
+                    self._status.showMessage(
+                        f"Updated class for ID {target_id} to '{new_cls_name}' on frame {frame_idx + 1}.", 3000
+                    )
 
     def _on_escape_pressed(self):
         if self._canvas:
@@ -734,6 +895,7 @@ class MainWindow(QMainWindow):
             "<tr><td><b>Esc</b></td><td>Deselect box / Cancel Add Box mode</td></tr>"
             "<tr><td><b>Ctrl+Z</b></td><td>Undo last action</td></tr>"
             "<tr><td><b>Ctrl+Y</b></td><td>Redo action</td></tr>"
+            "<tr><td><b>Ctrl+T</b></td><td>Toggle Dark / Light theme</td></tr>"
             "<tr><td><b>S / Ctrl+S</b></td><td>Save edits to tracks.json</td></tr>"
             "<tr><td><b>Left Arrow / A</b></td><td>Previous frame</td></tr>"
             "<tr><td><b>Right Arrow / D</b></td><td>Next frame</td></tr>"
@@ -853,6 +1015,52 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e: QCloseEvent):
         self._settings.save_window(self.saveGeometry(), self.saveState())
         e.accept()
+
+    # ── Theme Management ──────────────────────────────────────────────────
+
+    def _toggle_theme(self):
+        next_theme = "light" if self._current_theme == "dark" else "dark"
+        self._apply_theme(next_theme, save=True)
+
+    def _apply_theme(self, theme_name: str, save: bool = True):
+        self._current_theme = theme_name
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(get_app_stylesheet(theme_name))
+
+        colors = get_theme_colors(theme_name)
+        if hasattr(self, "_canvas_placeholder") and self._canvas_placeholder:
+            self._canvas_placeholder.setStyleSheet(
+                f"background:{colors['BG_BASE']}; font-size:15px; color:{colors['TEXT_SEC']};"
+            )
+        if hasattr(self, "_bottom_container") and self._bottom_container:
+            self._bottom_container.setStyleSheet(f"background:{colors['BG_SURFACE']};")
+
+        if hasattr(self, "_timeline") and self._timeline:
+            self._timeline.set_theme(theme_name)
+
+        if hasattr(self, "_canvas") and self._canvas:
+            self._canvas.set_theme(theme_name)
+
+        if hasattr(self, "_track_panel") and self._track_panel:
+            self._track_panel.set_theme(theme_name)
+
+        if hasattr(self, "_act_theme_dark") and hasattr(self, "_act_theme_light"):
+            self._act_theme_dark.setChecked(theme_name == "dark")
+            self._act_theme_light.setChecked(theme_name == "light")
+
+        if hasattr(self, "_btn_theme_toggle") and self._btn_theme_toggle:
+            if theme_name == "dark":
+                self._btn_theme_toggle.setText("🌙 Dark")
+                self._btn_theme_toggle.setToolTip("Currently Dark Mode. Click to switch to Light Mode (Ctrl+T)")
+            else:
+                self._btn_theme_toggle.setText("☀️ Light")
+                self._btn_theme_toggle.setToolTip("Currently Light Mode. Click to switch to Dark Mode (Ctrl+T)")
+
+        if save:
+            self._settings.set_theme(theme_name)
+            mode_str = "Light" if theme_name == "light" else "Dark"
+            self._status.showMessage(f"Theme switched to {mode_str} Mode", 2500)
 
     # ── Direct open from CLI ───────────────────────────────────────────────
 

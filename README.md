@@ -16,6 +16,7 @@ An interactive PyQt/PySide6 desktop application for viewing, editing, merging, r
 - **Track Management**:
   - Hover or select any bounding box to reveal a red `×` button for quick deletion.
   - Track panel for listing active tracks, hiding/showing tracks, and merging tracks across frames.
+- **Dark / Light Theme**: Instant toggle between sleek Dark Mode and high-contrast Light Mode via View menu, top-right corner button, or `Ctrl+T`.
 - **Undo / Redo Support**: Full history stack (`Ctrl+Z` / `Ctrl+Y`).
 - **Autosave & Session Recovery**: Automatic saving and crash recovery.
 
@@ -63,6 +64,7 @@ python main.py path/to/bytetrack_folder/tracks.json
 | `C` or Single-click ID | Edit track ID in-place |
 | Click red `×` on box | Delete bounding box |
 | `Delete` | Delete selected bounding box |
+| `Ctrl + T` | Toggle Dark / Light theme mode |
 | `Ctrl + Z` | Undo last edit |
 | `Ctrl + Y` | Redo edit |
 | `Ctrl + S` | Save `tracks.json` |
